@@ -43,7 +43,7 @@ def calculate_iou(box1, box2):
 
 
 # Function to perform multi-object tracking using IoU
-def match_to_track(detections, tracks, frame, sigma_iou):
+def match_to_track(detections, tracks, frame, track_count, sigma_iou):
 
     tracks_to_delete = []
     was_matched = np.zeros(len(detections[frame]))
@@ -95,17 +95,19 @@ def match_to_track(detections, tracks, frame, sigma_iou):
     # Create new tracks for unmatched detections
     for i in range(len(was_matched)):
         if not was_matched[i]:
-            detections[frame][i] = len(tracks)
+            detections[frame][i][0] = track_count
+            track_count += 1
             tracks.append([detections[frame][i]])
 
-    return tracks
+    return tracks, track_count
 
 
 def multi_obkect_iou_tracker(detections, sigma_iou):
     tracks = []
+    track_count = 1
 
     for frame in range(1, len(detections) + 1):
-        tracks = match_to_track(detections, tracks, frame, sigma_iou)
+        tracks, track_count = match_to_track(detections, tracks, frame, track_count, sigma_iou)
 
     return tracks
 
@@ -122,8 +124,9 @@ def draw_boxes_on_frames(detections, output_path):
 
         # Draw bounding boxes and track IDs on the frame
         for detection in frame_detection:
-            print(track_id)
             track_id, x, y, w, h, _, _, _, _ = detection
+            #if track_id != 1:
+            #    continue
             x, y, w, h = map(int, [x, y, w, h])
             color = tuple(np.random.randint(0, 255, 3).tolist())
 
