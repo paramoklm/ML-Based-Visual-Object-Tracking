@@ -30,6 +30,7 @@ class KalmanFilter:
         self.P = np.dot(np.dot(self.A, self.P), self.A.T) + self.Q
 
     def update(self, z):
+        print("Z: ", z)
         # Update the state estimate and error covariance based on measurements
         S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
         K = np.dot(np.dot(self.P, self.H.T), np.linalg.inv(S))
@@ -49,5 +50,43 @@ if __name__ == "__main__":
     kalman_filter.predict()
     z_measurement = np.array([[10], [10]])
     kalman_filter.update(z_measurement)
-    print("Predicted State Estimate:", kalman_filter.x_pred)
+    print("Update State Estimate:", kalman_filter.x_pred)
+    kalman_filter.predict()
+    print("Predicted 11: ", kalman_filter.x_pred)
+    z_measurement = np.array([[11], [11]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
 
+    kalman_filter.predict()
+    print("Predicted 12: ", kalman_filter.x_pred)
+    z_measurement = np.array([[12], [12]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
+
+    kalman_filter.predict()
+    print("Predicted: 13", kalman_filter.x_pred)
+
+    z_measurement = np.array([[13], [13]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
+
+    kalman_filter.predict()
+    print("Predicted: 14", kalman_filter.x_pred)
+    z_measurement = np.array([[14], [14]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
+
+    kalman_filter.predict()
+    print("Predicted: 15", kalman_filter.x_pred)
+    z_measurement = np.array([[15], [15]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
+
+    kalman_filter.predict()
+    print("Predicted: 16", kalman_filter.x_pred)
+    z_measurement = np.array([[16], [16]])
+    kalman_filter.update(z_measurement)
+    print("Update State Estimate:", kalman_filter.x_pred)
+
+    kalman_filter.predict()
+    print("Predicted: 17", kalman_filter.x_pred)

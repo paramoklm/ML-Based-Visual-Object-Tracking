@@ -32,12 +32,17 @@ def main():
 
         if centers:
             # Track the object using Kalman Filter
+            print("Centers 1: ", centers)
             kalman_filter.predict()
+            print("Centers 2: ", centers)
             kalman_filter.update(np.array(centers[0]))
+            print("Centers 3: ", centers)
 
             # Visualize tracking results
             detected_center = centers[0].astype(int).flatten()
+            print("Detected Centers: ", detected_center)
             predicted_position = kalman_filter.x_pred[:2].astype(int).flatten()
+            print("Predicted Position: ", predicted_position)
 
             if not cap.isOpened():
                 break

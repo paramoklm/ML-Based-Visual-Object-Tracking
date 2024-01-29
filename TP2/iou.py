@@ -48,7 +48,7 @@ def match_to_track(detections, tracks, frame, track_count, sigma_iou):
     tracks_to_delete = []
     was_matched = np.zeros(len(detections[frame]))
     # For all tracks
-    for track_id, track in enumerate(tracks):
+    for track_id, track in tracks.items():
         # Get last track position
         obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
         last_track_box = [x_t, y_t, w_t, h_t]
@@ -96,39 +96,50 @@ def match_to_track(detections, tracks, frame, track_count, sigma_iou):
     for i in range(len(was_matched)):
         if not was_matched[i]:
             detections[frame][i][0] = track_count
+            tracks[track_count] = [detections[frame][i]]
             track_count += 1
-            tracks.append([detections[frame][i]])
 
     return tracks, track_count
 
 
-def multi_obkect_iou_tracker(detections, sigma_iou):
-    tracks = []
-    track_count = 1
+def multi_object_iou_tracker(detections, sigma_iou):
+    tracks = {}
+    track_count = 0
 
     for frame in range(1, len(detections) + 1):
         tracks, track_count = match_to_track(detections, tracks, frame, track_count, sigma_iou)
 
-    return tracks
+    return detections
 
 
 import cv2
 import numpy as np
 
-# Function to draw bounding boxes and track IDs on frames
+from matplotlib import cm
+
 def draw_boxes_on_frames(detections, output_path):
+    # Define a colormap (you can choose a different colormap if needed)
+    colormap = cm.get_cmap('viridis')
+
     for frame_num, frame_detection in detections.items():
         # Load the frame
-        frame_path = f"ADL-Rundle-6/img1/{frame_num:06d}.jpg"  # Replace with the actual path to your frames
+        frame_path = f"../ADL-Rundle-6/img1/{frame_num:06d}.jpg"  # Replace with the actual path to your frames
         frame = cv2.imread(frame_path)
+
+        # Get unique track IDs from the current frame
+        unique_track_ids = set(detection[0] for detection in frame_detection)
+
+        # Assign a color to each unique track ID using the colormap
+        track_id_to_color = {track_id: (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+                             for track_id, color in zip(unique_track_ids, colormap(np.linspace(0, 1, len(unique_track_ids))))}
 
         # Draw bounding boxes and track IDs on the frame
         for detection in frame_detection:
             track_id, x, y, w, h, _, _, _, _ = detection
-            #if track_id != 1:
-            #    continue
             x, y, w, h = map(int, [x, y, w, h])
-            color = tuple(np.random.randint(0, 255, 3).tolist())
+
+            # Get the color associated with the track ID
+            color = track_id_to_color[track_id]
 
             # Draw bounding box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
@@ -141,13 +152,21 @@ def draw_boxes_on_frames(detections, output_path):
         cv2.imwrite(output_frame_path, frame)
 
 
+def write_detections_to_file(detections, output_file):
+    with open(output_file, 'w') as file:
+        for frame, frame_detections in detections.items():
+            for detection in frame_detections:
+                detection[5] = 1
+                line = f"{frame},{','.join(map(str, detection))}\n"
+                file.write(line)
+
 
 # Main function
 def main():
     # Load detections from the text file
-    detections = load_detections("ADL-Rundle-6/det/det.txt")
+    detections = load_detections("../ADL-Rundle-6/det/det.txt")
 
-    tracks = multi_obkect_iou_tracker(detections, 0.5)
+    detections = multi_object_iou_tracker(detections, 0.5)
 
     # for frame in range(1, len(detections) + 1):
     #     print("Frame number: ", frame)
@@ -156,6 +175,8 @@ def main():
 
     output_frames_path = "output/"  # Replace with the desired output path
     draw_boxes_on_frames(detections, output_frames_path)
+
+    write_detections_to_file(detections, "output.txt")
 
 if __name__ == "__main__":
     main()
