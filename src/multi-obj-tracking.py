@@ -3,6 +3,24 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from KalmanFilter import KalmanFilter
 
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input
+
+# Load ResNet model (pre-trained on ImageNet)
+# base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=Input(shape=(224, 224, 3)))
+
+# Create a model that outputs the ResNet features
+# model = Model(inputs=base_model.input, outputs=base_model.layers[-1].output)
+model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')  # Use global average pooling
+
+
+# Cache features for each image
+image_features_cache = {}
+
 # Function to draw bounding boxes and track IDs on frames
 def draw_boxes_on_frames(detections, output_path):
     for frame_num, frame_detection in detections.items():
@@ -92,11 +110,53 @@ def init_kalman_filter(left, top, width, height):
     return kalman_filter
 
 def update_kalman_filter(kalman_filter, left, top, width, height):
-    x, y = get_bbox_center(left, top, width, height)
+    x, y = bbox_to_centroides(left, top, width, height)
     z_measurement = np.array([[x], [y]])
     kalman_filter.update(z_measurement)
 
     return kalman_filter.x_pred.flatten().tolist()
+
+
+def extract_bbox_image(file_path, x, y, w, h):
+    # Read the image
+    image = cv2.imread(file_path)
+
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    # Extract the specified bounding box
+    bbox_image = image[y:y + h, x:x + w]
+
+    return bbox_image
+
+def extract_resnet_features(file_path, x, y, w, h, frame):
+
+    if file_path in image_features_cache:
+        return image_features_cache[file_path]
+
+    # Extract the bounding box image
+    bbox_image = extract_bbox_image(file_path, x, y, w, h)
+
+    # Preprocess the image for ResNet
+    bbox_image = cv2.resize(bbox_image, (224, 224))  # Resize to ResNet input size
+    bbox_image = image.img_to_array(bbox_image)
+    bbox_image = preprocess_input(bbox_image)
+
+    # Get ResNet features for the bounding box image
+    features = model.predict(bbox_image.reshape(1, 224, 224, 3), verbose=0)
+
+    return features
+
+def compute_similarity(features1, features2):
+    # Flatten the features
+    flat_features1 = features1.flatten()
+    flat_features2 = features2.flatten()
+
+    # Compute the dot product and normalize
+    similarity = np.dot(flat_features1, flat_features2) / (np.linalg.norm(flat_features1) * np.linalg.norm(flat_features2))
+
+    return similarity
 
 def predict_kalman_filter(kalman_filter, width, height):
 
@@ -104,7 +164,8 @@ def predict_kalman_filter(kalman_filter, width, height):
     x, y, _, _ = kalman_filter.x_pred.flatten().tolist()
     return centroides_to_bbox(x, y, width, height)
 
-def match_to_track(detections, tracks, karman_filters, frame, track_count, sigma_iou):
+def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma_iou, alpha_iou, alpha_similarity):
+    print(f"Frame : {frame}")
     # Init matrix with computations
     cost_matrix = np.zeros((len(tracks), len(detections[frame])))
 
@@ -115,27 +176,30 @@ def match_to_track(detections, tracks, karman_filters, frame, track_count, sigma
         obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
         # Get karman_filter for track
         kalman_filter = kalman_filters[track_id]
-        checkpoints = (kalman_filters.x_pred, kalman_filters.P)
+        checkpoints = (kalman_filter.x_pred, kalman_filter.P)
 
         # Predict with kalman filter and specific bbox
-        predict_bbox = predict_kalman_filter(kalman_filter, width, height)
+        predict_bbox = predict_kalman_filter(kalman_filter, w_t, h_t)
+
+        last_bbox_features = extract_resnet_features(f"../ADL-RUNDLE-6/img1/{frame-1:06d}.jpg", int(x_t), int(y_t), int(w_t), int(h_t), frame)
 
         # Reset kalman filter to checkpoint
-        kalman_filters.x_pred, kalman_filters.P = checkpoints
+        kalman_filter.x_pred, kalman_filter.P = checkpoints
 
         # For all detections
         for j, detection in enumerate(detections[frame]):
             obj_id, x, y, w, h, conf, _, _, _ = detection
             current_box = [x, y, w, h]
 
-            # Predict with kalman filter and specific bbox
-            predict_bbox = predict_kalman_filter(kalman_filter, width, height)
+            current_bbox_features = extract_resnet_features(f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg", int(x), int(y), int(w), int(h), frame)
+
+            similarity = compute_similarity(last_bbox_features, current_bbox_features)
 
             # Compute IoU between the last track detection and the current detection
-            iou = calculate_iou(last_track_box, current_box)
+            iou = compute_iou(predict_bbox, current_box)
 
             # Cost is the complement of IoU, as linear_sum_assignment finds the minimum cost assignment
-            cost_matrix[i, j] = 1 - iou
+            cost_matrix[i, j] = alpha_iou * (1 - iou) + alpha_similarity * (1 - similarity)
 
 
     # Use Hungarian algorithm to find optimal assignment
@@ -233,7 +297,7 @@ def match_to_track(detections, tracks, karman_filters, frame, track_count, sigma
         # Increment track_count
         track_count += 1
 
-    return tracks, track_count
+    return tracks, kalman_filters, track_count
 
 def main():
     # Load detections from the text file
@@ -241,11 +305,12 @@ def main():
 
     # Initialize empty tracks dictionary and track count
     tracks = {}
+    kalman_filters = {}
     track_count = 0
 
     # Perform multi-object tracking using Hungarian algorithm
     for frame in range(1, len(detections) + 1):
-        tracks, track_count = match_to_track(detections, tracks, frame, track_count, 0.01)
+        tracks, kalman_filters, track_count = match_to_track(detections, tracks, kalman_filters, frame, track_count, 0, 0.1, 0.9)
 
     # Draw bounding boxes and track IDs on frames
     output_frames_path = "output/"  # Replace with the desired output path
