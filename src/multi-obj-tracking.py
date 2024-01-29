@@ -513,10 +513,10 @@ def main():
         tracks, kalman_filters, track_count = match_to_track(detections, tracks, kalman_filters, frame, track_count, 0, 0.2, 0.5, 0.7, 0.3)
 
     # Draw bounding boxes and track IDs on frames
-    output_frames_path = "output/"  # Replace with the desired output path
+    output_frames_path = "output_retry/"  # Replace with the desired output path
     draw_boxes_on_frames(detections, output_frames_path)
 
-    output_file_path = "detections_output.txt"
+    output_file_path = "detections_output_retry.txt"
     write_detections_to_file(detections, output_file_path)
 
 if __name__ == "__main__":
