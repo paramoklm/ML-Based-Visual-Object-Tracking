@@ -3,19 +3,46 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from KalmanFilter import KalmanFilter
 
-from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.applications.resnet50 import preprocess_input
 from tensorflow.keras.preprocessing import image
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input
+
+import timm
+import torch
+from torchvision import transforms
+from PIL import Image
+
+import torch.nn.functional as F
+
+import concurrent.futures
+
+# Load EfficientNet-B1 model
+model = timm.create_model("efficientnet_b1", pretrained=True)
+model.eval()
+
+# Define image transformations for EfficientNet-B1
+transform = transforms.Compose([
+    transforms.Resize((240, 240)),  # Resize input image to the required size
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+image_cache = {}
+
+# Function to open an image and store it in the cache
+def open_image(file_path):
+    if file_path not in image_cache:
+        img = cv2.imread(file_path)
+        image_cache[file_path] = img
+    return image_cache[file_path]
 
 # Load ResNet model (pre-trained on ImageNet)
 # base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=Input(shape=(224, 224, 3)))
 
 # Create a model that outputs the ResNet features
 # model = Model(inputs=base_model.input, outputs=base_model.layers[-1].output)
-model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')  # Use global average pooling
+#model = MobileNetV2(weights='imagenet', include_top=False, pooling='avg')  # Use global average pooling
 
 
 # Cache features for each image
@@ -148,6 +175,99 @@ def extract_resnet_features(file_path, x, y, w, h, frame):
 
     return features
 
+def extract_efficientnet_features(file_path, x, y, w, h):
+    # Read the image
+    image = cv2.imread(file_path)
+    
+    # Ensure x, y, w, h are within the image boundaries
+    x, y, w, h = int(max(0, x)), int(max(0, y)), int(max(1, w)), int(max(1, h))
+    
+    # Extract the specified bounding box
+    bbox_image = image[y:y + h, x:x + w]
+
+    # Convert the array to a PIL image
+    pil_image = Image.fromarray(bbox_image)
+
+    # Preprocess the image for EfficientNet-B1
+    pil_image = pil_image.convert("RGB")
+    pil_image = transform(pil_image).unsqueeze(0)  # Add batch dimension
+
+    # Forward pass through EfficientNet-B1
+    with torch.no_grad():
+        features = model(pil_image)
+
+    return features
+
+
+# def extract_efficientnet_features(file_path, x, y, w, h):
+#     # Open the image using the cached function
+#     image = open_image(file_path)
+# 
+#     # Extract the specified bounding box
+#     bbox_image = image[y:y + h, x:x + w]
+#     # bbox_image = image.crop((x, y, x + w, y + h))
+# 
+#     # Convert to PIL image
+#     pil_image = Image.fromarray(bbox_image)
+# 
+#     # Preprocess the image for EfficientNet-B1
+#     bbox_image = transform(pil_image).unsqueeze(0)  # Add batch dimension
+# 
+#     # Forward pass through EfficientNet-B1
+#     with torch.no_grad():
+#         features = model(bbox_image)
+# 
+#     return features
+
+# def extract_efficientnet_features(file_path, x, y, w, h):
+#     # Read the image
+#     image = Image.open(file_path).convert("RGB")
+# 
+#     # Extract the specified bounding box
+#     bbox_image = image.crop((x, y, x + w, y + h))
+# 
+#     # Preprocess the image for EfficientNet-B1
+#     bbox_image = transform(bbox_image).unsqueeze(0)  # Add batch dimension
+# 
+#     # Forward pass through EfficientNet-B1
+#     with torch.no_grad():
+#         features = model(bbox_image)
+# 
+#     return features
+
+from PIL import Image
+
+# def extract_efficientnet_features_batch(file_paths, boxes):
+#     images = [Image.open(file_path).convert("RGB") for file_path in file_paths]
+#     bbox_images = [image.crop((x, y, x + w, y + h)) for image, (x, y, w, h) in zip(images, boxes)]
+# 
+#     # Preprocess images for EfficientNet-B1
+#     bbox_images = [transform(bbox_image).unsqueeze(0) for bbox_image in bbox_images]
+# 
+#     # Forward pass through EfficientNet-B1
+#     with torch.no_grad():
+#         features = model(torch.cat(bbox_images))
+# 
+#     return features
+
+# Function to extract EfficientNet features for a batch using the cached images
+def extract_efficientnet_features_batch(file_paths, boxes):
+    images = [open_image(file_path) for file_path in file_paths]
+    # bbox_images = [image.crop((x, y, x + w, y + h)) for image, (x, y, w, h) in zip(images, boxes)]
+    bbox_images = [image[y:y + h, x:x + w] for image, (x, y, w, h) in zip(images, boxes)]
+
+    # Convert to PIL images
+    pil_images = [Image.fromarray(bbox_image) for bbox_image in bbox_images]
+
+    # Preprocess images for EfficientNet-B1
+    bbox_images = [transform(pil_image).unsqueeze(0) for pil_image in pil_images]
+
+    # Forward pass through EfficientNet-B1
+    with torch.no_grad():
+        features = model(torch.cat(bbox_images))
+
+    return features
+
 def compute_similarity(features1, features2):
     # Flatten the features
     flat_features1 = features1.flatten()
@@ -164,6 +284,43 @@ def predict_kalman_filter(kalman_filter, width, height):
     x, y, _, _ = kalman_filter.x_pred.flatten().tolist()
     return centroides_to_bbox(x, y, width, height)
 
+def compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity):
+    track_id, track, kalman_filters = x
+    obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
+    kalman_filter = kalman_filters[track_id]
+    checkpoints = (kalman_filter.x_pred, kalman_filter.P)
+
+    predict_bbox = predict_kalman_filter(kalman_filter, w_t, h_t)
+    last_bbox_features = extract_efficientnet_features(f"../ADL-RUNDLE-6/img1/{frame-1:06d}.jpg", int(x_t), int(y_t), int(w_t), int(h_t))
+
+    # Reset kalman filter to checkpoint
+    kalman_filter.x_pred, kalman_filter.P = checkpoints
+
+    #current_boxes = np.array([[detection[1], detection[2], detection[3], detection[4]] for detection in detections[frame]])
+    current_boxes = np.array([[int(max(0, detection[1])), int(max(0, detection[2])), int(max(0, detection[3])), int(max(0, detection[4]))] for detection in detections[frame]])
+
+    current_bbox_features_list = extract_efficientnet_features_batch(
+        [f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg"] * len(current_boxes),
+        current_boxes
+    )
+
+    # Assuming current_boxes is a numpy array
+    # current_bbox_features_list = np.array(list(map(lambda box: extract_efficientnet_features(f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg", int(box[0]), int(box[1]), int(box[2]), int(box[3])), current_boxes)))
+
+    # current_bbox_features_list = np.array([extract_efficientnet_features(f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg", int(x), int(y), int(w), int(h)) for x, y, w, h in current_boxes])
+
+    # Assuming current_boxes is a numpy array
+    ious = 1 - np.array(list(map(lambda x: compute_iou(predict_bbox, x), current_boxes)))
+
+    # ious = 1 - np.array([compute_iou(predict_bbox, current_box) for current_box in current_boxes])
+
+    similarities = 1 - np.array([compute_similarity(last_bbox_features, current_bbox_features) for current_bbox_features in current_bbox_features_list])
+
+    # Compute cost matrix for the current track
+    cost_matrix_track = alpha_iou * ious + alpha_similarity * similarities
+
+    return cost_matrix_track
+
 def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma_iou, alpha_iou, alpha_similarity):
     print(f"Frame : {frame}")
     # Init matrix with computations
@@ -171,35 +328,45 @@ def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma
 
     # Compute iou for all combinations
     # For all tracks
-    for i, (track_id, track) in enumerate(tracks.items()):
-        # Get last bbox of track
-        obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
-        # Get karman_filter for track
-        kalman_filter = kalman_filters[track_id]
-        checkpoints = (kalman_filter.x_pred, kalman_filter.P)
+    # for i, (track_id, track) in enumerate(tracks.items()):
+    #     # Get last bbox of track
+    #     obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
+    #     # Get karman_filter for track
+    #     kalman_filter = kalman_filters[track_id]
+    #     checkpoints = (kalman_filter.x_pred, kalman_filter.P)
 
-        # Predict with kalman filter and specific bbox
-        predict_bbox = predict_kalman_filter(kalman_filter, w_t, h_t)
+    #     # Predict with kalman filter and specific bbox
+    #     predict_bbox = predict_kalman_filter(kalman_filter, w_t, h_t)
 
-        last_bbox_features = extract_resnet_features(f"../ADL-RUNDLE-6/img1/{frame-1:06d}.jpg", int(x_t), int(y_t), int(w_t), int(h_t), frame)
+    #     last_bbox_features = extract_efficientnet_features(f"../ADL-RUNDLE-6/img1/{frame-1:06d}.jpg", int(x_t), int(y_t), int(w_t), int(h_t))
 
-        # Reset kalman filter to checkpoint
-        kalman_filter.x_pred, kalman_filter.P = checkpoints
+    #     # Reset kalman filter to checkpoint
+    #     kalman_filter.x_pred, kalman_filter.P = checkpoints
 
-        # For all detections
-        for j, detection in enumerate(detections[frame]):
-            obj_id, x, y, w, h, conf, _, _, _ = detection
-            current_box = [x, y, w, h]
+    #     # For all detections
+    #     for j, detection in enumerate(detections[frame]):
+    #         obj_id, x, y, w, h, conf, _, _, _ = detection
+    #         current_box = [x, y, w, h]
 
-            current_bbox_features = extract_resnet_features(f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg", int(x), int(y), int(w), int(h), frame)
+    #         current_bbox_features = extract_efficientnet_features(f"../ADL-RUNDLE-6/img1/{frame:06d}.jpg", int(x), int(y), int(w), int(h))
 
-            similarity = compute_similarity(last_bbox_features, current_bbox_features)
+    #         similarity = compute_similarity(last_bbox_features, current_bbox_features)
 
-            # Compute IoU between the last track detection and the current detection
-            iou = compute_iou(predict_bbox, current_box)
+    #         # Compute IoU between the last track detection and the current detection
+    #         iou = compute_iou(predict_bbox, current_box)
 
-            # Cost is the complement of IoU, as linear_sum_assignment finds the minimum cost assignment
-            cost_matrix[i, j] = alpha_iou * (1 - iou) + alpha_similarity * (1 - similarity)
+    #         # Cost is the complement of IoU, as linear_sum_assignment finds the minimum cost assignment
+    #         cost_matrix[i, j] = alpha_iou * (1 - iou) + alpha_similarity * (1 - similarity)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Use concurrent.futures for parallel processing
+        results = list(executor.map(lambda x: compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity),
+                             ((track_id, track, kalman_filters) for track_id, track in tracks.items())))
+
+
+    # Fill cost_matrix with the results
+    for i, (track_id, _) in enumerate(tracks.items()):
+        cost_matrix[i, :] = results[i]
 
 
     # Use Hungarian algorithm to find optimal assignment
@@ -299,6 +466,14 @@ def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma
 
     return tracks, kalman_filters, track_count
 
+def write_detections_to_file(detections, output_file):
+    with open(output_file, 'w') as file:
+        for frame, frame_detections in detections.items():
+            for detection in frame_detections:
+                detection[5] = 1
+                line = f"{frame},{','.join(map(str, detection))}\n"
+                file.write(line)
+
 def main():
     # Load detections from the text file
     detections = load_detections("../ADL-Rundle-6/det/det.txt")
@@ -306,15 +481,20 @@ def main():
     # Initialize empty tracks dictionary and track count
     tracks = {}
     kalman_filters = {}
-    track_count = 0
+    track_count = 1
 
     # Perform multi-object tracking using Hungarian algorithm
     for frame in range(1, len(detections) + 1):
+        if frame > 10:
+            break
         tracks, kalman_filters, track_count = match_to_track(detections, tracks, kalman_filters, frame, track_count, 0, 0.1, 0.9)
 
     # Draw bounding boxes and track IDs on frames
     output_frames_path = "output/"  # Replace with the desired output path
     draw_boxes_on_frames(detections, output_frames_path)
+
+    output_file_path = "detections_output.txt"
+    write_detections_to_file(detections, output_file_path)
 
 if __name__ == "__main__":
     main()
