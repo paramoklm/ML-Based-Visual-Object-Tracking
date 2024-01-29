@@ -17,6 +17,8 @@ import torch.nn.functional as F
 
 import concurrent.futures
 
+from matplotlib import cm
+
 # Load EfficientNet-B1 model
 model = timm.create_model("efficientnet_b1", pretrained=True)
 model.eval()
@@ -48,20 +50,31 @@ def open_image(file_path):
 # Cache features for each image
 image_features_cache = {}
 
+
 # Function to draw bounding boxes and track IDs on frames
 def draw_boxes_on_frames(detections, output_path):
+    # Define a colormap (you can choose a different colormap if needed)
+    colormap = cm.get_cmap('viridis')
+
     for frame_num, frame_detection in detections.items():
         # Load the frame
         frame_path = f"../ADL-Rundle-6/img1/{frame_num:06d}.jpg"  # Replace with the actual path to your frames
         frame = cv2.imread(frame_path)
 
+        # Get unique track IDs from the current frame
+        unique_track_ids = set(detection[0] for detection in frame_detection)
+
+        # Assign a color to each unique track ID using the colormap
+        track_id_to_color = {track_id: (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+                             for track_id, color in zip(unique_track_ids, colormap(np.linspace(-1, 1, len(unique_track_ids))))}
+
         # Draw bounding boxes and track IDs on the frame
         for detection in frame_detection:
             track_id, x, y, w, h, _, _, _, _ = detection
-            #if track_id != 1:
-            #    continue
             x, y, w, h = map(int, [x, y, w, h])
-            color = tuple(np.random.randint(0, 255, 3).tolist())
+
+            # Get the color associated with the track ID
+            color = track_id_to_color[track_id]
 
             # Draw bounding box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
@@ -72,6 +85,7 @@ def draw_boxes_on_frames(detections, output_path):
         # Save the frame with bounding boxes and track IDs
         output_frame_path = f"{output_path}/{frame_num:06d}_with_boxes.jpg"
         cv2.imwrite(output_frame_path, frame)
+
 
 # Function to load detections from a text file
 def load_detections(file_path):
@@ -284,7 +298,7 @@ def predict_kalman_filter(kalman_filter, width, height):
     x, y, _, _ = kalman_filter.x_pred.flatten().tolist()
     return centroides_to_bbox(x, y, width, height)
 
-def compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity):
+def compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity, size_threshold, alpha_size_diff):
     track_id, track, kalman_filters = x
     obj_id_t, x_t, y_t, w_t, h_t, conf_t, _, _, _ = track[-1]
     kalman_filter = kalman_filters[track_id]
@@ -316,12 +330,21 @@ def compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity):
 
     similarities = 1 - np.array([compute_similarity(last_bbox_features, current_bbox_features) for current_bbox_features in current_bbox_features_list])
 
-    # Compute cost matrix for the current track
-    cost_matrix_track = alpha_iou * ious + alpha_similarity * similarities
+    # Calculate size differences
+    size_diffs = np.array([np.abs((w_t * h_t) - (box[2] * box[3])) for box in current_boxes])
+    size_diffs_normalized = size_diffs / (w_t * h_t)  # Normalize by the size of the last bbox
+
+    # Apply threshold and coefficient to size differences
+    size_diffs_cost = np.where(size_diffs_normalized > size_threshold, 1, size_diffs_normalized)
+
+    # Compute the final cost matrix for the current track
+    cost_matrix_track = alpha_iou * ious + alpha_similarity * similarities + alpha_size_diff * size_diffs_cost
+
+    # Create a mask for the boxes that have a size difference above the threshold
 
     return cost_matrix_track
 
-def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma_iou, alpha_iou, alpha_similarity):
+def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma_iou, alpha_iou, alpha_similarity, size_threshold, alpha_size_diff):
     print(f"Frame : {frame}")
     # Init matrix with computations
     cost_matrix = np.zeros((len(tracks), len(detections[frame])))
@@ -360,7 +383,7 @@ def match_to_track(detections, tracks, kalman_filters, frame, track_count, sigma
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         # Use concurrent.futures for parallel processing
-        results = list(executor.map(lambda x: compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity),
+        results = list(executor.map(lambda x: compute_cost_matrix(x, detections, frame, alpha_iou, alpha_similarity, size_threshold, alpha_size_diff),
                              ((track_id, track, kalman_filters) for track_id, track in tracks.items())))
 
 
@@ -485,9 +508,9 @@ def main():
 
     # Perform multi-object tracking using Hungarian algorithm
     for frame in range(1, len(detections) + 1):
-        if frame > 10:
+        if frame > 200:
             break
-        tracks, kalman_filters, track_count = match_to_track(detections, tracks, kalman_filters, frame, track_count, 0, 0.1, 0.9)
+        tracks, kalman_filters, track_count = match_to_track(detections, tracks, kalman_filters, frame, track_count, 0, 0.2, 0.5, 0.7, 0.3)
 
     # Draw bounding boxes and track IDs on frames
     output_frames_path = "output/"  # Replace with the desired output path
